@@ -1,0 +1,385 @@
+<!doctype html>
+
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>APNG Preview & Checker</title>
+
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 20px;
+        background: #222;
+        color: #fff;
+        font-family: Arial, sans-serif;
+      }
+
+      h1 {
+        margin: 0 0 10px 0;
+        font-size: 24px;
+        font-weight: normal;
+      }
+
+      .summary {
+        margin-bottom: 20px;
+        font-size: 14px;
+        color: #bbb;
+      }
+
+      .summary .ok {
+        color: #6ee7a0;
+      }
+
+      .summary .fail {
+        color: #ff7777;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, 214px);
+        gap: 12px;
+        width: fit-content;
+        margin: auto;
+      }
+
+      .item {
+        background: #333;
+        border-radius: 10px;
+        padding: 10px;
+        text-align: center;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      }
+
+      .preview {
+        width: 194px;
+        height: 164px;
+        overflow: hidden;
+        padding: 0;
+        margin: 0 auto;
+        background: #111;
+      }
+
+      .preview img {
+        display: block;
+        width: 194px;
+        height: 164px;
+        object-fit: fill;
+        margin: 0;
+        padding: 0;
+      }
+
+      .info {
+        margin-top: 8px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: #ccc;
+        text-align: center;
+      }
+
+      .filename {
+        color: #fff;
+        font-weight: bold;
+      }
+
+      .status {
+        margin-top: 5px;
+        font-weight: bold;
+      }
+
+      .status.ok {
+        color: #6ee7a0;
+      }
+
+      .status.fail {
+        color: #ff7777;
+      }
+
+      .status.loading {
+        color: #aaa;
+      }
+
+      @media (max-width: 1000px) {
+        .grid {
+          grid-template-columns: repeat(3, 214px);
+        }
+      }
+
+      @media (max-width: 700px) {
+        .grid {
+          grid-template-columns: repeat(2, 214px);
+        }
+      }
+
+      @media (max-width: 450px) {
+        .grid {
+          grid-template-columns: 214px;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>APNG Preview & Checker</h1>
+
+    <div class="summary" id="summary">Checking files...</div>
+
+    <div class="grid" id="previewGrid"></div>
+
+    <script>
+      const grid = document.getElementById("previewGrid");
+      const summary = document.getElementById("summary");
+
+      // ==============================
+      // APNG limits
+      // ==============================
+
+      const MAX_FILE_SIZE = 1024 * 1024; // 1 MB
+      const MAX_FRAMES = 20;
+
+      let totalFiles = 0;
+      let checkedFiles = 0;
+      let passedFiles = 0;
+      let failedFiles = 0;
+
+      // ==============================
+      // Format file size
+      // ==============================
+
+      function formatFileSize(bytes) {
+        if (bytes >= 1024 * 1024) {
+          return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+        }
+
+        return (bytes / 1024).toFixed(1) + " KB";
+      }
+
+      // ==============================
+      // Read APNG frame count
+      //
+      // APNG contains:
+      //
+      // acTL chunk
+      //   4 bytes = number of frames
+      //   4 bytes = number of plays
+      //
+      // We read the PNG chunks directly.
+      // ==============================
+
+      function getAPNGFrameCount(buffer) {
+        const view = new DataView(buffer);
+
+        // PNG signature
+        const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+        for (let i = 0; i < 8; i++) {
+          if (view.getUint8(i) !== pngSignature[i]) {
+            return null;
+          }
+        }
+
+        let offset = 8;
+
+        while (offset + 8 <= view.byteLength) {
+          const length = view.getUint32(offset);
+
+          const type = String.fromCharCode(
+            view.getUint8(offset + 4),
+            view.getUint8(offset + 5),
+            view.getUint8(offset + 6),
+            view.getUint8(offset + 7),
+          );
+
+          // acTL = APNG animation control chunk
+          if (type === "acTL") {
+            if (length >= 8 && offset + 16 <= view.byteLength) {
+              const frameCount = view.getUint32(offset + 8);
+
+              return frameCount;
+            }
+
+            return null;
+          }
+
+          // Move to next PNG chunk
+          offset += 12 + length;
+        }
+
+        return null;
+      }
+
+      // ==============================
+      // Create preview item
+      // ==============================
+
+      for (let i = 1; i <= 24; i++) {
+        const number = String(i).padStart(2, "0");
+        const filename = `${number}.png`;
+        const filepath = `img/${filename}`;
+
+        totalFiles++;
+
+        const item = document.createElement("div");
+        item.className = "item";
+
+        const preview = document.createElement("div");
+        preview.className = "preview";
+
+        const img = document.createElement("img");
+        img.src = filepath;
+        img.alt = filename;
+
+        const info = document.createElement("div");
+        info.className = "info";
+
+        info.innerHTML = `
+        <div class="filename">${filename}</div>
+        <div>Loading...</div>
+      `;
+
+        // ==============================
+        // Image loaded
+        // ==============================
+
+        img.onload = async function () {
+          try {
+            const width = img.naturalWidth;
+            const height = img.naturalHeight;
+
+            // Read file
+            const response = await fetch(filepath);
+
+            if (!response.ok) {
+              throw new Error("File could not be read");
+            }
+
+            const buffer = await response.arrayBuffer();
+
+            const fileSize = buffer.byteLength;
+
+            // Read APNG frame count
+            const frameCount = getAPNGFrameCount(buffer);
+
+            // Check limits
+            const sizeOK = fileSize <= MAX_FILE_SIZE;
+            const framesOK = frameCount !== null && frameCount <= MAX_FRAMES;
+
+            const passed = sizeOK && framesOK;
+
+            if (passed) {
+              passedFiles++;
+            } else {
+              failedFiles++;
+            }
+
+            checkedFiles++;
+
+            // ==============================
+            // Status text
+            // ==============================
+
+            let statusText = "";
+            let statusClass = "";
+
+            if (passed) {
+              statusText = "✓ OK";
+              statusClass = "ok";
+            } else {
+              statusClass = "fail";
+
+              const problems = [];
+
+              if (!sizeOK) {
+                problems.push("OVER 1 MB");
+              }
+
+              if (frameCount === null) {
+                problems.push("NOT APNG");
+              } else if (!framesOK) {
+                problems.push("OVER 20 FRAMES");
+              }
+
+              statusText = "✕ " + problems.join(" · ");
+            }
+
+            // ==============================
+            // Display information
+            // ==============================
+
+            info.innerHTML = `
+            <div class="filename">${filename}</div>
+            <div>${width} × ${height} px</div>
+            <div>${formatFileSize(fileSize)}</div>
+            <div>
+              ${
+                frameCount !== null
+                  ? `${frameCount} frames`
+                  : "Frame count unavailable"
+              }
+            </div>
+            <div class="status ${statusClass}">
+              ${statusText}
+            </div>
+          `;
+
+            updateSummary();
+          } catch (error) {
+            checkedFiles++;
+            failedFiles++;
+
+            info.innerHTML = `
+            <div class="filename">${filename}</div>
+            <div class="status fail">
+              ✕ Unable to read file
+            </div>
+          `;
+
+            updateSummary();
+          }
+        };
+
+        // ==============================
+        // Missing file
+        // ==============================
+
+        img.onerror = function () {
+          item.style.display = "none";
+
+          totalFiles--;
+        };
+
+        preview.appendChild(img);
+
+        item.appendChild(preview);
+        item.appendChild(info);
+
+        grid.appendChild(item);
+      }
+
+      // ==============================
+      // Update summary
+      // ==============================
+
+      function updateSummary() {
+        if (checkedFiles < totalFiles) {
+          summary.innerHTML = `Checking... ${checkedFiles}/${totalFiles}`;
+
+          return;
+        }
+
+        summary.innerHTML = `
+        <span class="ok">✓ ${passedFiles} OK</span>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        <span class="fail">✕ ${failedFiles} Failed</span>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        Limit: ≤ 1 MB · ≤ 20 frames
+      `;
+      }
+    </script>
+  </body>
+</html>
