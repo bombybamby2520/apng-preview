@@ -160,22 +160,30 @@
       }
 
       // ==============================
-      // Read APNG frame count
+      // Read APNG information
       //
-      // APNG contains:
+      // acTL:
+      //   num_frames
+      //   num_plays
       //
-      // acTL chunk
-      //   4 bytes = number of frames
-      //   4 bytes = number of plays
+      // fcTL:
+      //   delay_num
+      //   delay_den
       //
-      // We read the PNG chunks directly.
+      // FPS is calculated from the
+      // total duration of one animation loop.
       // ==============================
 
-      function getAPNGFrameCount(buffer) {
+      function getAPNGInfo(buffer) {
         const view = new DataView(buffer);
 
         // PNG signature
+
         const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+        if (view.byteLength < 8) {
+          return null;
+        }
 
         for (let i = 0; i < 8; i++) {
           if (view.getUint8(i) !== pngSignature[i]) {
@@ -185,8 +193,20 @@
 
         let offset = 8;
 
+        let frameCount = null;
+        let loopCount = null;
+
+        let totalDuration = 0;
+        let fcTLCount = 0;
+
         while (offset + 8 <= view.byteLength) {
           const length = view.getUint32(offset);
+
+          const chunkEnd = offset + 12 + length;
+
+          if (chunkEnd > view.byteLength) {
+            break;
+          }
 
           const type = String.fromCharCode(
             view.getUint8(offset + 4),
@@ -195,46 +215,167 @@
             view.getUint8(offset + 7),
           );
 
-          // acTL = APNG animation control chunk
+          // ==============================
+          // acTL
+          // ==============================
+
           if (type === "acTL") {
-            if (length >= 8 && offset + 16 <= view.byteLength) {
-              const frameCount = view.getUint32(offset + 8);
+            if (length >= 8) {
+              frameCount = view.getUint32(offset + 8);
 
-              return frameCount;
+              loopCount = view.getUint32(offset + 12);
             }
+          }
 
-            return null;
+          // ==============================
+          // fcTL
+          //
+          // APNG frame control
+          //
+          // Data:
+          // sequence_number  4 bytes
+          // width             4 bytes
+          // height            4 bytes
+          // x_offset          4 bytes
+          // y_offset          4 bytes
+          // delay_num         2 bytes
+          // delay_den         2 bytes
+          // dispose_op        1 byte
+          // blend_op          1 byte
+          // ==============================
+
+          if (type === "fcTL") {
+            if (length >= 26) {
+              // fcTL data layout:
+              //
+              // + 8  sequence_number  4 bytes
+              // + 12 width            4 bytes
+              // + 16 height           4 bytes
+              // + 20 x_offset         4 bytes
+              // + 24 y_offset         4 bytes
+              // + 28 delay_num        2 bytes
+              // + 30 delay_den        2 bytes
+              // + 32 dispose_op       1 byte
+              // + 33 blend_op         1 byte
+
+              const delayNum = view.getUint16(offset + 28);
+
+              let delayDen = view.getUint16(offset + 30);
+
+              // APNG specification:
+              // delay_den = 0 means 100
+
+              if (delayDen === 0) {
+                delayDen = 100;
+              }
+
+              const frameDuration = delayNum / delayDen;
+
+              totalDuration += frameDuration;
+
+              fcTLCount++;
+            }
           }
 
           // Move to next PNG chunk
-          offset += 12 + length;
+
+          offset = chunkEnd;
+
+          // Stop after IEND
+
+          if (type === "IEND") {
+            break;
+          }
         }
 
-        return null;
+        // ==============================
+        // Calculate FPS
+        // ==============================
+
+        let fps = null;
+
+        if (frameCount !== null && totalDuration > 0) {
+          fps = frameCount / totalDuration;
+        }
+
+        return {
+          frameCount,
+          loopCount,
+          fps,
+          totalDuration,
+          fcTLCount,
+        };
       }
 
       // ==============================
-      // Create preview item
+      // Format FPS
+      // ==============================
+
+      function formatFPS(fps) {
+        if (fps === null || !Number.isFinite(fps)) {
+          return "FPS unavailable";
+        }
+
+        // Show clean values such as:
+        // 6 FPS
+        // 12 FPS
+        // 5.5 FPS
+
+        if (Math.abs(fps - Math.round(fps)) < 0.01) {
+          return `${Math.round(fps)} FPS`;
+        }
+
+        return `${fps.toFixed(2)} FPS`;
+      }
+
+      // ==============================
+      // Format loop count
+      // ==============================
+
+      function formatLoops(loopCount) {
+        if (loopCount === null) {
+          return "Loops unavailable";
+        }
+
+        // APNG:
+        // 0 = infinite
+
+        if (loopCount === 0) {
+          return "∞ loops";
+        }
+
+        return `${loopCount} ${loopCount === 1 ? "loop" : "loops"}`;
+      }
+
+      // ==============================
+      // Create preview items
       // ==============================
 
       for (let i = 1; i <= 24; i++) {
         const number = String(i).padStart(2, "0");
+
         const filename = `${number}.png`;
+
         const filepath = `img/${filename}`;
 
         totalFiles++;
 
         const item = document.createElement("div");
+
         item.className = "item";
 
         const preview = document.createElement("div");
+
         preview.className = "preview";
 
         const img = document.createElement("img");
+
         img.src = filepath;
+
         img.alt = filename;
 
         const info = document.createElement("div");
+
         info.className = "info";
 
         info.innerHTML = `
@@ -249,9 +390,13 @@
         img.onload = async function () {
           try {
             const width = img.naturalWidth;
+
             const height = img.naturalHeight;
 
+            // ==============================
             // Read file
+            // ==============================
+
             const response = await fetch(filepath);
 
             if (!response.ok) {
@@ -262,11 +407,24 @@
 
             const fileSize = buffer.byteLength;
 
-            // Read APNG frame count
-            const frameCount = getAPNGFrameCount(buffer);
+            // ==============================
+            // Read APNG information
+            // ==============================
 
+            const apng = getAPNGInfo(buffer);
+
+            const frameCount = apng ? apng.frameCount : null;
+
+            const loopCount = apng ? apng.loopCount : null;
+
+            const fps = apng ? apng.fps : null;
+
+            // ==============================
             // Check limits
+            // ==============================
+
             const sizeOK = fileSize <= MAX_FILE_SIZE;
+
             const framesOK = frameCount !== null && frameCount <= MAX_FRAMES;
 
             const passed = sizeOK && framesOK;
@@ -280,14 +438,16 @@
             checkedFiles++;
 
             // ==============================
-            // Status text
+            // Status
             // ==============================
 
             let statusText = "";
+
             let statusClass = "";
 
             if (passed) {
               statusText = "✓ OK";
+
               statusClass = "ok";
             } else {
               statusClass = "fail";
@@ -312,9 +472,19 @@
             // ==============================
 
             info.innerHTML = `
-            <div class="filename">${filename}</div>
-            <div>${width} × ${height} px</div>
-            <div>${formatFileSize(fileSize)}</div>
+
+            <div class="filename">
+              ${filename}
+            </div>
+
+            <div>
+              ${width} × ${height} px
+            </div>
+
+            <div>
+              ${formatFileSize(fileSize)}
+            </div>
+
             <div>
               ${
                 frameCount !== null
@@ -322,21 +492,37 @@
                   : "Frame count unavailable"
               }
             </div>
+
+            <div>
+              ${formatFPS(fps)}
+            </div>
+
+            <div>
+              ${formatLoops(loopCount)}
+            </div>
+
             <div class="status ${statusClass}">
               ${statusText}
             </div>
+
           `;
 
             updateSummary();
           } catch (error) {
             checkedFiles++;
+
             failedFiles++;
 
             info.innerHTML = `
-            <div class="filename">${filename}</div>
+
+            <div class="filename">
+              ${filename}
+            </div>
+
             <div class="status fail">
               ✕ Unable to read file
             </div>
+
           `;
 
             updateSummary();
@@ -356,6 +542,7 @@
         preview.appendChild(img);
 
         item.appendChild(preview);
+
         item.appendChild(info);
 
         grid.appendChild(item);
@@ -373,11 +560,21 @@
         }
 
         summary.innerHTML = `
-        <span class="ok">✓ ${passedFiles} OK</span>
+
+        <span class="ok">
+          ✓ ${passedFiles} OK
+        </span>
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
-        <span class="fail">✕ ${failedFiles} Failed</span>
+
+        <span class="fail">
+          ✕ ${failedFiles} Failed
+        </span>
+
         &nbsp;&nbsp;|&nbsp;&nbsp;
+
         Limit: ≤ 1 MB · ≤ 20 frames
+
       `;
       }
     </script>
